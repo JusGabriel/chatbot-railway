@@ -4,6 +4,7 @@ from pydantic import BaseModel
 import motor.motor_asyncio
 from bson import ObjectId
 from sklearn.feature_extraction.text import TfidfVectorizer
+import numpy as np
 
 # FastAPI app
 app = FastAPI()
@@ -22,6 +23,7 @@ MONGO_URI = "mongodb://mongo:YvjDmHBINTcvxYWvLCzHaNJGmeBTjZWc@mongodb.railway.in
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
 db = client.IA
 coleccion = db.conversacions
+pendientes = db.aprendizaje
 
 # Preguntas y respuestas ampliadas
 preguntas = [
@@ -30,8 +32,6 @@ preguntas = [
     "¿qué puedes hacer?",
     "adiós",
     "gracias",
-
-    # Info prácticas pre-profesionales y convalidación
     "¿Cuántas horas de PPP y Servicio comunitario se necesitan?",
     "¿Con quién debo comunicarme en caso de dudas?",
     "¿Se puede registrar en un mismo formulario horas de PPP y servicio comunitario?",
@@ -52,8 +52,6 @@ respuestas = [
     "Puedo responder tus preguntas básicas.",
     "Adiós, que tengas un buen día.",
     "De nada, estoy aquí para ayudarte.",
-
-    # Respuestas basadas en el texto que enviaste
     "Tecnología Superior: 240 horas de Prácticas Laborales y 96 de Servicio Comunitario. Modalidad dual: 2000 horas de Prácticas Laborales y 100 de Servicio Comunitario.",
     "Con tu tutor. Si no cuentas con tutor, puedes escribir a vinculacion.esfot@epn.edu.ec",
     "No, no se pueden registrar en un mismo formulario horas de PPP y servicio comunitario.",
@@ -117,18 +115,22 @@ async def eliminar_conversacion(conv_id: str):
     return {"message": "Conversación eliminada"}
 
 @app.post("/buscar")
-def buscar_similar(query: str = Body(..., embed=True)):
-    query_vec = vectorizer.transform([query])
+async def buscar_similar(query: str = Body(..., embed=True), historial: list[str] = Body(default=[])):
+    contexto = " ".join(historial[-3:])  # usa las últimas 3 entradas como contexto
+    texto_total = contexto + " " + query if contexto else query
+
+    query_vec = vectorizer.transform([texto_total])
     similitudes = (X * query_vec.T).toarray().flatten()
 
-    if max(similitudes) < 0.1:
+    if np.max(similitudes) < 0.1:
+        await pendientes.insert_one({"pregunta": query, "contexto": historial})
         return {
-            "respuesta": "No entiendo eso todavía 😅",
+            "respuesta": "Lo siento, aún no tengo información sobre eso 😅",
             "necesita_aprendizaje": True,
             "pregunta_original": query
         }
 
-    idx = similitudes.argmax()
+    idx = np.argmax(similitudes)
     return {
         "respuesta": respuestas[idx],
         "necesita_aprendizaje": False
