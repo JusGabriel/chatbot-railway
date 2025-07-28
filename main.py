@@ -1,15 +1,16 @@
-from fastapi import FastAPI, Body, HTTPException
+from fastapi import FastAPI, Body, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import motor.motor_asyncio
 from bson import ObjectId
 from sklearn.feature_extraction.text import TfidfVectorizer
 import numpy as np
+from typing import Optional
 
 # FastAPI app
 app = FastAPI()
 
-# CORS
+# CORS (permite todo, ajustar según necesidad)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,14 +19,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# MongoDB (ajusta MONGO_URI según tu configuración)
-MONGO_URI = "mongodb://mongo:YvjDmHBINTcvxYWvLCzHaNJGmeBTjZWc@mongodb.railway.internal:27017"
+# MongoDB conexión (tu URL)
+MONGO_URI = "mongodb://mongo:BHFQycLysgYtindKTQJOWyFJUyTNLxiv@mongodb.railway.internal:27017"
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
-db = client.IA
+db = client['IA']  # Cambia si tu base tiene otro nombre
 coleccion = db.conversacions
 pendientes = db.aprendizaje
+coleccion_clientes = db.clientes  # Colección usuarios
 
-# Preguntas y respuestas ampliadas
+# Preguntas y respuestas
 preguntas = [
     "hola",
     "¿cómo estás?",
@@ -66,57 +68,89 @@ respuestas = [
     "La convalidación es un procedimiento para validar actividades extracurriculares que puedes registrar como prácticas, siguiendo un proceso administrativo específico.",
 ]
 
-# Vectorizador TF-IDF y entrenamiento
+# TF-IDF Vectorizer
 vectorizer = TfidfVectorizer()
 X = vectorizer.fit_transform(preguntas)
 
-# Modelo para mensajes
+# Modelos Pydantic
 class Mensaje(BaseModel):
     rol: str
     contenido: str
+
+class NuevaConversacion(BaseModel):
+    primerMensaje: str
+
+# Función para obtener usuario desde token en header Authorization: Bearer <token>
+async def obtener_usuario(authorization: Optional[str] = Header(None)):
+    if authorization is None or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Token requerido")
+    token = authorization.split(" ")[1]
+    usuario = await coleccion_clientes.find_one({"token": token})
+    if usuario is None:
+        raise HTTPException(status_code=401, detail="Token inválido")
+    return usuario
 
 @app.get("/")
 def ping():
     return {"message": "Servidor ON 🚀"}
 
+# Obtener conversaciones solo del usuario logueado
 @app.get("/conversaciones")
-async def obtener_conversaciones():
+async def obtener_conversaciones(usuario=Depends(obtener_usuario)):
     conversaciones = []
-    async for conv in coleccion.find({}, {"titulo": 1, "mensajes": 1}):
+    cursor = coleccion.find({"usuario_id": usuario["_id"]})
+    async for conv in cursor:
         conv["_id"] = str(conv["_id"])
+        conv["usuario_id"] = str(conv["usuario_id"])
         conversaciones.append(conv)
     return conversaciones
 
+# Crear nueva conversación con usuario_id
 @app.post("/conversaciones/nuevo")
-async def nueva_conversacion(primerMensaje: str = Body(..., embed=True)):
-    nueva = {
-        "titulo": primerMensaje[:30],
-        "mensajes": [{"rol": "Estudiante", "contenido": primerMensaje}]
+async def nueva_conversacion(nueva: NuevaConversacion, usuario=Depends(obtener_usuario)):
+    doc = {
+        "usuario_id": usuario["_id"],
+        "titulo": nueva.primerMensaje[:30],
+        "mensajes": [{"rol": "Estudiante", "contenido": nueva.primerMensaje}]
     }
-    resultado = await coleccion.insert_one(nueva)
-    nueva["_id"] = str(resultado.inserted_id)
-    return {"conversacion": nueva}
+    result = await coleccion.insert_one(doc)
+    doc["_id"] = str(result.inserted_id)
+    doc["usuario_id"] = str(doc["usuario_id"])
+    return {"conversacion": doc}
 
+# Agregar mensaje solo si conversación pertenece al usuario
 @app.post("/conversaciones/{conv_id}/mensajes")
-async def agregar_mensaje(conv_id: str, mensaje: Mensaje):
+async def agregar_mensaje(conv_id: str, mensaje: Mensaje, usuario=Depends(obtener_usuario)):
+    conversacion = await coleccion.find_one({"_id": ObjectId(conv_id)})
+    if conversacion is None:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    if str(conversacion["usuario_id"]) != str(usuario["_id"]):
+        raise HTTPException(status_code=403, detail="No autorizado")
     res = await coleccion.update_one(
         {"_id": ObjectId(conv_id)},
         {"$push": {"mensajes": mensaje.dict()}}
     )
     if res.modified_count == 0:
-        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+        raise HTTPException(status_code=500, detail="Error al guardar mensaje")
     return {"message": "Mensaje guardado"}
 
+# Eliminar conversación solo si pertenece al usuario
 @app.delete("/conversaciones/{conv_id}")
-async def eliminar_conversacion(conv_id: str):
+async def eliminar_conversacion(conv_id: str, usuario=Depends(obtener_usuario)):
+    conversacion = await coleccion.find_one({"_id": ObjectId(conv_id)})
+    if conversacion is None:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    if str(conversacion["usuario_id"]) != str(usuario["_id"]):
+        raise HTTPException(status_code=403, detail="No autorizado")
     res = await coleccion.delete_one({"_id": ObjectId(conv_id)})
     if res.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+        raise HTTPException(status_code=500, detail="Error al eliminar conversación")
     return {"message": "Conversación eliminada"}
 
+# Buscador de respuestas con TF-IDF
 @app.post("/buscar")
 async def buscar_similar(query: str = Body(..., embed=True), historial: list[str] = Body(default=[])):
-    contexto = " ".join(historial[-3:])  # usa las últimas 3 entradas como contexto
+    contexto = " ".join(historial[-3:])  # contexto últimas 3 entradas
     texto_total = contexto + " " + query if contexto else query
 
     query_vec = vectorizer.transform([texto_total])
