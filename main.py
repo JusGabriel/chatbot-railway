@@ -7,27 +7,25 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 import numpy as np
 from typing import Optional
 
-# FastAPI app
 app = FastAPI()
 
-# CORS (permite todo, ajustar según necesidad)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # ajustar en producción
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# MongoDB conexión (tu URL)
+# Conexión MongoDB Railway (ajusta tu URI)
 MONGO_URI = "mongodb://mongo:BHFQycLysgYtindKTQJOWyFJUyTNLxiv@mongodb.railway.internal:27017"
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
-db = client['IA']  # Cambia si tu base tiene otro nombre
+db = client['IA']
 coleccion = db.conversacions
 pendientes = db.aprendizaje
-coleccion_clientes = db.clientes  # Colección usuarios
+coleccion_clientes = db.clientes
 
-# Preguntas y respuestas
+# Preguntas y respuestas para chatbot
 preguntas = [
     "hola",
     "¿cómo estás?",
@@ -68,7 +66,7 @@ respuestas = [
     "La convalidación es un procedimiento para validar actividades extracurriculares que puedes registrar como prácticas, siguiendo un proceso administrativo específico.",
 ]
 
-# TF-IDF Vectorizer
+# TF-IDF vectorizador
 vectorizer = TfidfVectorizer()
 X = vectorizer.fit_transform(preguntas)
 
@@ -80,7 +78,7 @@ class Mensaje(BaseModel):
 class NuevaConversacion(BaseModel):
     primerMensaje: str
 
-# Función para obtener usuario desde token en header Authorization: Bearer <token>
+# Obtener usuario desde token en header Authorization: Bearer <token>
 async def obtener_usuario(authorization: Optional[str] = Header(None)):
     if authorization is None or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Token requerido")
@@ -94,7 +92,7 @@ async def obtener_usuario(authorization: Optional[str] = Header(None)):
 def ping():
     return {"message": "Servidor ON 🚀"}
 
-# Obtener conversaciones solo del usuario logueado
+# Listar conversaciones del usuario
 @app.get("/conversaciones")
 async def obtener_conversaciones(usuario=Depends(obtener_usuario)):
     conversaciones = []
@@ -105,7 +103,7 @@ async def obtener_conversaciones(usuario=Depends(obtener_usuario)):
         conversaciones.append(conv)
     return conversaciones
 
-# Crear nueva conversación con usuario_id
+# Crear conversación para usuario
 @app.post("/conversaciones/nuevo")
 async def nueva_conversacion(nueva: NuevaConversacion, usuario=Depends(obtener_usuario)):
     doc = {
@@ -118,7 +116,7 @@ async def nueva_conversacion(nueva: NuevaConversacion, usuario=Depends(obtener_u
     doc["usuario_id"] = str(doc["usuario_id"])
     return {"conversacion": doc}
 
-# Agregar mensaje solo si conversación pertenece al usuario
+# Agregar mensaje solo si conversación pertenece a usuario
 @app.post("/conversaciones/{conv_id}/mensajes")
 async def agregar_mensaje(conv_id: str, mensaje: Mensaje, usuario=Depends(obtener_usuario)):
     conversacion = await coleccion.find_one({"_id": ObjectId(conv_id)})
@@ -147,10 +145,10 @@ async def eliminar_conversacion(conv_id: str, usuario=Depends(obtener_usuario)):
         raise HTTPException(status_code=500, detail="Error al eliminar conversación")
     return {"message": "Conversación eliminada"}
 
-# Buscador de respuestas con TF-IDF
+# Buscar respuesta con TF-IDF
 @app.post("/buscar")
 async def buscar_similar(query: str = Body(..., embed=True), historial: list[str] = Body(default=[])):
-    contexto = " ".join(historial[-3:])  # contexto últimas 3 entradas
+    contexto = " ".join(historial[-3:])
     texto_total = contexto + " " + query if contexto else query
 
     query_vec = vectorizer.transform([texto_total])
